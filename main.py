@@ -21,7 +21,7 @@ def main():
     # Configuration
     CSV_FILE = './data/raw/prepared_dataset.csv'
     BATCH_SIZE = 32
-    NUM_EPOCHS = 1
+    NUM_EPOCHS = 2
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 1e-5
     SEED = 42
