@@ -64,14 +64,35 @@ class PatchEmbed(nn.Module):
         else:
             self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
         B, C, H, W = x.shape
-        # FIXME look at relaxing size constraints
+
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x).flatten(2).transpose(1, 2)
-        return x
 
+        if mask is not None:
+
+            if mask.shape[-2:] != (H, W):
+                mask = F.interpolate(mask, size=(H, W), mode='nearest')
+
+            binary_mask = (mask.sum(dim=1, keepdim=True) > 0).float()
+
+            r_p = F.avg_pool2d(binary_mask, kernel_size=self.patch_size, stride=self.patch_size)
+
+            epsilon = 1e-6
+            w_p = epsilon + r_p
+
+            w_p = w_p / (w_p.mean(dim=(2, 3), keepdim=True) + epsilon)
+        else:
+            w_p = None
+
+        x = self.proj(x)
+
+        if w_p is not None:
+            x = x * w_p
+
+        x = x.flatten(2).transpose(1, 2)
+        return x
 
 class CrossAttention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
@@ -100,6 +121,8 @@ class CrossAttention(nn.Module):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, 1, C)   # (BH1N @ BHN(C/H)) -> BH1(C/H) -> B1H(C/H) -> B1C
+        #weights = attn
+
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -123,6 +146,10 @@ class CrossAttentionBlock(nn.Module):
 
     def forward(self, x):
         x = x[:, 0:1, ...] + self.drop_path(self.attn(self.norm1(x)))
+
+        #out, weights = self.attn(self.norm1(x))
+        # x = x[:, 0:1, ...] + self.drop_path(out)
+
         if self.has_mlp:
             x = x + self.drop_path(self.mlp(self.norm2(x)))
 
@@ -286,15 +313,17 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x_branch0, x_branch1):
+    def forward_features(self, x_branch0, x_branch1,):
         # On met les deux images dans une liste
         inputs = [x_branch0, x_branch1]
+
+        mask = x_branch1
         
         xs = []
         for i in range(self.num_branches):
             # On prend l'image correspondante à la branche i
             x_in = inputs[i]
-            
+
             # Gestion de la taille (Interpolation si nécessaire)
             # Car parfois la branche 0 veut du 240x240 et la branche 1 du 224x224
             if x_in.shape[-2] != self.img_size[i] or x_in.shape[-1] != self.img_size[i]:
@@ -304,7 +333,8 @@ class VisionTransformer(nn.Module):
                  )
             
             # Embedding (PatchEmbed)
-            tmp = self.patch_embed[i](x_in)
+            #tmp = self.patch_embed[i](x_in)
+            tmp = self.patch_embed[i](x_in, mask=mask)
             
             # Ajout CLS token + Position
             B = x_in.shape[0]
