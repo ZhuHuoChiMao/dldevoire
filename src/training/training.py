@@ -173,14 +173,13 @@ def train_model_crossvit(model, dataloaders, criterion, optimizer, scheduler, co
                         optimizer.step()
 
                     if phase == 'val' and epoch % 5 == 0 and batch_idx == 0:
-                        # 确保函数已经定义在外部
                         visualize_attention_map(
-                            inputs_non_seg[0],  # 原始图
-                            rollout_map[0],  # 注意力热力图
-                            inputs_seg[0],  # 真实分割掩码
-                            config,
-                            epoch,
-                            idx=batch_idx
+                            image=inputs_non_seg[0],
+                            rollout_map=rollout_map[0],
+                            mask_gt=inputs_seg[0],
+                            config_name=config,
+                            idx=epoch,  # 这里用 epoch 作为文件名的唯一标识
+                            output_dir='./results/heatmaps'
                         )
 
                 # Statistics
