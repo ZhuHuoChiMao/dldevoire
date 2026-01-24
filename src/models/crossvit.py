@@ -150,7 +150,7 @@ class CrossAttentionBlock(nn.Module):
             self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x):
-        x = x[:, 0:1, ...] + self.drop_path(self.attn(self.norm1(x)))
+        #x = x[:, 0:1, ...] + self.drop_path(self.attn(self.norm1(x)))
 
         out, weights = self.attn(self.norm1(x))
         x = x[:, 0:1, ...] + self.drop_path(out)
