@@ -11,48 +11,58 @@ import cv2
 
 
 def visualize_attention_map(image, rollout_map, mask_gt, config_name, idx, output_dir='./results/heatmaps'):
-    """
-    Partie 4b: 可视化注意力热力图并与原图、Mask 对比
-    Args:
-        image: 原始图像 [3, H, W] (Tensor)
-        rollout_map: calculate_rollout 算出的热力图 [H, W] (Tensor)
-        mask_gt: 真实的分割图 [3, H, W] (Tensor)
-    """
     os.makedirs(output_dir, exist_ok=True)
 
-    # 转换图像格式以便绘图 (C,H,W) -> (H,W,C)
+    # 1. 处理原图
     img = image.permute(1, 2, 0).cpu().numpy()
-    # 归一化到 0-1
-    img = (img - img.min()) / (img.max() - img.min())
+    img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+    h, w, _ = img.shape  # 通常是 224, 224
 
-    # 处理 rollout_map (热力图)
-    heatmap = rollout_map.cpu().numpy()
-    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())  # 归一化
+    # 2. 处理 rollout_map (Reshape + Resize)
+    heatmap_raw = rollout_map.cpu().numpy()
 
-    # 生成彩色热力图 (使用 OpenCV 的 JET 映射)
-    heatmap_color = cv2.applyColorMap(np.uint8(255 * heatmap), cv2.COLORMAP_JET)
+    # 核心修正：将 196 还原为 14x14 的网格
+    # 如果 rollout_map 是 (196,) 或者 (1, 196) 等形状
+    side = int(np.sqrt(heatmap_raw.size))
+    heatmap_2d = heatmap_raw.reshape(side, side)
+
+    # 核心修正：使用双三次插值将 14x14 放大到 224x224
+    heatmap_resized = cv2.resize(heatmap_2d, (w, h), interpolation=cv2.INTER_CUBIC)
+
+    # 归一化热力图
+    heatmap_resized = (heatmap_resized - heatmap_resized.min()) / (heatmap_resized.max() - heatmap_resized.min() + 1e-8)
+
+    # 3. 生成彩色热力图
+    heatmap_color = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
     heatmap_color = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB) / 255.0
 
-    # 叠加图：原图 * 0.6 + 热力图 * 0.4
+    # 4. 叠加 (现在 shapes 都是 224,224,3，可以相加了)
     overlay = img * 0.6 + heatmap_color * 0.4
 
-    # 绘图
+    # 5. 处理 Mask (用于显示)
+    # 如果 mask 只有 1 个通道，imshow 需要处理；如果是 3 通道则直接 permute
+    mask_np = mask_gt.cpu().numpy()
+    if mask_np.shape[0] == 3:
+        mask_np = mask_np.transpose(1, 2, 0)
+    else:
+        mask_np = mask_np.squeeze()
+
+    # 绘图逻辑
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     axes[0].imshow(img)
     axes[0].set_title("Original Image")
 
-    axes[1].imshow(mask_gt.permute(1, 2, 0).cpu().numpy())
+    axes[1].imshow(mask_np)
     axes[1].set_title("Ground Truth Mask")
 
-    axes[2].imshow(heatmap, cmap='jet')
-    axes[2].set_title("Attention Heatmap (Rollout)")
+    axes[2].imshow(heatmap_resized, cmap='jet')
+    axes[2].set_title("Attention Heatmap")
 
     axes[3].imshow(overlay)
     axes[3].set_title("Overlay (Explanation)")
 
     for ax in axes: ax.axis('off')
-
-    plt.suptitle(f"Config {config_name} - Sample {idx}", fontsize=15)
+    plt.suptitle(f"Config {config_name} - Epoch {idx}", fontsize=15)
 
     output_path = os.path.join(output_dir, f'heatmap_{config_name}_{idx}.png')
     plt.savefig(output_path, bbox_inches='tight')
