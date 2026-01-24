@@ -218,43 +218,43 @@ class MultiScaleBlock(nn.Module):
                 tmp = [norm_layer(dim[(d+1) % num_branches]), act_layer(), nn.Linear(dim[(d+1) % num_branches], dim[d])]
             self.revert_projs.append(nn.Sequential(*tmp))
 
-
     def forward(self, x):
         all_attns = []
 
+        # --- 1. 处理分支内部的 Block (Self-Attention) ---
         outs_b = []
         for x_, block in zip(x, self.blocks):
-            curr_x = x_
             if block is not None:
-                for b in block:
-                    print(f"DEBUG: Type={type(b)}, Len={len(b(curr_x))}")
-                    curr_x, attn = b(curr_x)
-                    all_attns.append(attn)
+                # 关键修改：直接调用 block(x_)，不再遍历里面的小 b
+                # 这样就不会因为 timm.Block 只返回一个值而报错了
+                curr_x = block(x_)
+            else:
+                curr_x = x_
             outs_b.append(curr_x)
 
-
+        # --- 2. 准备 CLS Token 投影 ---
         proj_cls_token = [proj(out[:, 0:1]) for out, proj in zip(outs_b, self.projs)]
 
-
+        # --- 3. 处理融合层 (Cross-Attention) ---
         outs = []
         for i in range(self.num_branches):
-
+            # 拼接 CLS 和 另一个分支的 Patches
             tmp = torch.cat((proj_cls_token[i], outs_b[(i + 1) % self.num_branches][:, 1:, ...]), dim=1)
 
-
+            # 这里是你修改过的 Cross-Attention 逻辑，保留解包！
             if isinstance(self.fusion[i], nn.Sequential):
                 for f_block in self.fusion[i]:
-
+                    # 因为你改了 CrossAttentionBlock 的 forward，它会返回 2 个值
                     tmp, c_attn = f_block(tmp)
                     all_attns.append(c_attn)  # 收集 Cross-Attention 的权重
             else:
                 tmp, c_attn = self.fusion[i](tmp)
                 all_attns.append(c_attn)
 
+            # 还原投影并拼接回原分支
             reverted_proj_cls_token = self.revert_projs[i](tmp[:, 0:1, ...])
             tmp = torch.cat((reverted_proj_cls_token, outs_b[i][:, 1:, ...]), dim=1)
             outs.append(tmp)
-
 
         return outs, all_attns
 
