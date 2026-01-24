@@ -18,6 +18,11 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from timm.models.registry import register_model
 from timm.models.vision_transformer import _cfg, Mlp, Block
 
+import torch.nn.functional as F
+import math
+import torch
+import numpy as np
+
 _model_urls = {
     'crossvit_15_224': 'https://github.com/IBM/CrossViT/releases/download/weights-0.1/crossvit_15_224.pth',
     'crossvit_15_dagger_224': 'https://github.com/IBM/CrossViT/releases/download/weights-0.1/crossvit_15_dagger_224.pth',
@@ -121,11 +126,11 @@ class CrossAttention(nn.Module):
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, 1, C)   # (BH1N @ BHN(C/H)) -> BH1(C/H) -> B1H(C/H) -> B1C
-        #weights = attn
+        weights = attn
 
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x
+        return x,weights
 
 
 class CrossAttentionBlock(nn.Module):
@@ -147,13 +152,13 @@ class CrossAttentionBlock(nn.Module):
     def forward(self, x):
         x = x[:, 0:1, ...] + self.drop_path(self.attn(self.norm1(x)))
 
-        #out, weights = self.attn(self.norm1(x))
-        # x = x[:, 0:1, ...] + self.drop_path(out)
+        out, weights = self.attn(self.norm1(x))
+        x = x[:, 0:1, ...] + self.drop_path(out)
 
         if self.has_mlp:
             x = x + self.drop_path(self.mlp(self.norm2(x)))
 
-        return x
+        return x,weights
 
 
 class MultiScaleBlock(nn.Module):
@@ -209,7 +214,7 @@ class MultiScaleBlock(nn.Module):
             else:
                 tmp = [norm_layer(dim[(d+1) % num_branches]), act_layer(), nn.Linear(dim[(d+1) % num_branches], dim[d])]
             self.revert_projs.append(nn.Sequential(*tmp))
-
+    '''
     def forward(self, x):
         outs_b = [block(x_) for x_, block in zip(x, self.blocks)]
         # only take the cls token out
@@ -223,6 +228,45 @@ class MultiScaleBlock(nn.Module):
             tmp = torch.cat((reverted_proj_cls_token, outs_b[i][:, 1:, ...]), dim=1)
             outs.append(tmp)
         return outs
+    '''
+
+    def forward(self, x):
+        all_attns = []
+
+
+        outs_b = []
+        for x_, block in zip(x, self.blocks):
+            curr_x = x_
+            if block is not None:
+                for b in block:
+                    curr_x, attn = b(curr_x)
+                    all_attns.append(attn)
+            outs_b.append(curr_x)
+
+
+        proj_cls_token = [proj(out[:, 0:1]) for out, proj in zip(outs_b, self.projs)]
+
+
+        outs = []
+        for i in range(self.num_branches):
+
+            tmp = torch.cat((proj_cls_token[i], outs_b[(i + 1) % self.num_branches][:, 1:, ...]), dim=1)
+
+
+            if isinstance(self.fusion[i], nn.Sequential):
+                for f_block in self.fusion[i]:
+                    tmp, c_attn = f_block(tmp)
+                    all_attns.append(c_attn)  # 收集 Cross-Attention 的权重
+            else:
+                tmp, c_attn = self.fusion[i](tmp)
+                all_attns.append(c_attn)
+
+            reverted_proj_cls_token = self.revert_projs[i](tmp[:, 0:1, ...])
+            tmp = torch.cat((reverted_proj_cls_token, outs_b[i][:, 1:, ...]), dim=1)
+            outs.append(tmp)
+
+
+        return outs, all_attns
 
 
 def _compute_num_patches(img_size, patches):
@@ -313,6 +357,78 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+    def calculate_rollout(self, attns):
+        B, H, N_queries, N_keys = attns[0].shape
+        device = attns[0].device
+
+        result = torch.eye(N_keys).expand(B, N_keys, N_keys).to(device)
+
+        for attn in attns:
+            attn_avg = attn.mean(dim=1)
+
+            if attn_avg.shape[1] == 1:
+                identity = torch.eye(N_keys).expand(B, N_keys, N_keys).to(device)
+                combined = identity.clone()
+                combined[:, 0:1, :] = attn_avg
+                attn_avg = combined
+
+            identity = torch.eye(N_keys).expand(B, N_keys, N_keys).to(device)
+            attn_final = 0.5 * attn_avg + 0.5 * identity
+
+            attn_final = attn_final / attn_final.sum(dim=-1, keepdim=True)
+
+            result = torch.bmm(attn_final, result)
+
+        cls_attention = result[:, 0, 1:]
+
+        return cls_attention
+
+
+
+    def compute_iou(self, rollout_map, mask_gt):
+        """
+        实现 Partie 4c: 计算注意力热力图与真实掩码的 IoU
+        rollout_map: [B, N] - CLS Token 对所有 Patch 的注意力 (来自 calculate_rollout)
+        mask_gt: [B, C, H, W] - 原始分割图（用于作为真值参考）
+        """
+        B, N = rollout_map.shape
+        device = rollout_map.device
+
+        # 1. 还原空间结构 (例如 196 -> 14x14)
+        grid_size = int(math.sqrt(N))
+        # reshape 为 [B, 1, grid_size, grid_size]
+        attn_grid = rollout_map.reshape(B, 1, grid_size, grid_size)
+
+        # 2. 插值缩放到原始图像尺寸 (224, 224)
+        # 使用双线性插值让边缘更平滑
+        H_gt, W_gt = mask_gt.shape[-2:]
+        attn_upsampled = F.interpolate(attn_grid, size=(H_gt, W_gt), mode='bilinear', align_corners=False)
+        attn_upsampled = attn_upsampled.squeeze(1)  # [B, H_gt, W_gt]
+
+        # 3. 处理真实掩码 (Ground Truth)
+        # 只要 RGB 任一通道有值，即视为植物区域 (1)，否则为背景 (0)
+        binary_gt = (mask_gt.sum(dim=1) > 0).float()  # [B, H_gt, W_gt]
+
+        iou_list = []
+
+        # 4. 逐张图像计算 IoU
+        for i in range(B):
+            # 按照文档 4c 要求：取 0.8 分位数作为阈值
+            # 这意味着只有注意力最集中的前 20% 区域被视为预测的“植物”
+            thresh = torch.quantile(attn_upsampled[i], 0.8)
+            binary_pred = (attn_upsampled[i] >= thresh).float()
+
+            # 计算交集 (Intersection) 和 并集 (Union)
+            intersection = (binary_pred * binary_gt[i]).sum()
+            union = binary_pred.sum() + binary_gt[i].sum() - intersection
+
+            # 计算 IoU (加 epsilon 防止除以 0)
+            iou = (intersection + 1e-7) / (union + 1e-7)
+            iou_list.append(iou)
+
+        # 返回这一批次的平均 IoU
+        return torch.stack(iou_list)
+
     def forward_features(self, x_branch0, x_branch1,):
         # On met les deux images dans une liste
         inputs = [x_branch0, x_branch1]
@@ -345,8 +461,14 @@ class VisionTransformer(nn.Module):
             xs.append(tmp)
 
         # Passage dans les blocs Cross-Attention (C'est là que la fusion se fait)
+        all_model_attns = []
+        '''
         for blk in self.blocks:
             xs = blk(xs)
+        '''
+        for blk in self.blocks:
+            xs, blk_attns = blk(xs)
+            all_model_attns.extend(blk_attns)
 
         # Normalisation
         xs = [self.norm[i](x) for i, x in enumerate(xs)]
@@ -354,8 +476,8 @@ class VisionTransformer(nn.Module):
         # On garde seulement le token CLS
         out = [x[:, 0] for x in xs]
 
-        return out
-
+        return out,all_model_attns
+    '''
     def forward(self, x_branch0, x_branch1):
         # Appel de notre feature extractor double entrée
         xs = self.forward_features(x_branch0, x_branch1)
@@ -367,7 +489,23 @@ class VisionTransformer(nn.Module):
         ce_logits = torch.mean(torch.stack(ce_logits, dim=0), dim=0)
         
         return ce_logits
+    '''
 
+    def forward(self, x_branch0, x_branch1, return_attention=False):
+        xs, attns = self.forward_features(x_branch0, x_branch1)
+
+
+        ce_logits = [self.head[i](x) for i, x in enumerate(xs)]
+        ce_logits = torch.mean(torch.stack(ce_logits, dim=0), dim=0)
+
+        if return_attention:
+
+            rollout_map = self.calculate_rollout(attns)
+
+            iou_scores = self.compute_iou(rollout_map, x_branch1)
+            return ce_logits, iou_scores,rollout_map
+
+        return ce_logits
 
 
 @register_model
