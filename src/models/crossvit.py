@@ -178,7 +178,8 @@ class MultiScaleBlock(nn.Module):
                     Block(dim=dim[d], num_heads=num_heads[d], mlp_ratio=mlp_ratio[d], qkv_bias=qkv_bias, 
                           proj_drop=drop, attn_drop=attn_drop, drop_path=drop_path[i], norm_layer=norm_layer))
             if len(tmp) != 0:
-                self.blocks.append(nn.Sequential(*tmp))
+                #self.blocks.append(nn.Sequential(*tmp))
+                self.blocks.append(nn.ModuleList(tmp))
 
         if len(self.blocks) == 0:
             self.blocks = None
@@ -189,7 +190,8 @@ class MultiScaleBlock(nn.Module):
                 tmp = [nn.Identity()]
             else:
                 tmp = [norm_layer(dim[d]), act_layer(), nn.Linear(dim[d], dim[(d+1) % num_branches])]
-            self.projs.append(nn.Sequential(*tmp))
+            #self.projs.append(nn.Sequential(*tmp))
+            self.projs.append(nn.ModuleList(tmp))
 
         self.fusion = nn.ModuleList()
         for d in range(num_branches):
@@ -205,7 +207,8 @@ class MultiScaleBlock(nn.Module):
                     tmp.append(CrossAttentionBlock(dim=dim[d_], num_heads=nh, mlp_ratio=mlp_ratio[d], qkv_bias=qkv_bias, qk_scale=qk_scale,
                                                    drop=drop, attn_drop=attn_drop, drop_path=drop_path[-1], norm_layer=norm_layer,
                                                    has_mlp=False))
-                self.fusion.append(nn.Sequential(*tmp))
+                #self.fusion.append(nn.Sequential(*tmp))
+                self.fusion.append(nn.ModuleList(tmp))
 
         self.revert_projs = nn.ModuleList()
         for d in range(num_branches):
@@ -213,7 +216,8 @@ class MultiScaleBlock(nn.Module):
                 tmp = [nn.Identity()]
             else:
                 tmp = [norm_layer(dim[(d+1) % num_branches]), act_layer(), nn.Linear(dim[(d+1) % num_branches], dim[d])]
-            self.revert_projs.append(nn.Sequential(*tmp))
+            #self.revert_projs.append(nn.Sequential(*tmp))
+            self.revert_projs.append(nn.ModuleList(tmp))
 
 
     def forward(self, x):
@@ -240,7 +244,7 @@ class MultiScaleBlock(nn.Module):
 
             if isinstance(self.fusion[i], nn.Sequential):
                 for f_block in self.fusion[i]:
-                    print(f"DEBUG: Type={type(f_block)}, Len={len(f_block(tmp))}")
+
                     tmp, c_attn = f_block(tmp)
                     all_attns.append(c_attn)  # 收集 Cross-Attention 的权重
             else:
