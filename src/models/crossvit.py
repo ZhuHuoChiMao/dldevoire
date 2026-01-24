@@ -228,6 +228,7 @@ class MultiScaleBlock(nn.Module):
             curr_x = x_
             if block is not None:
                 for b in block:
+                    print(f"DEBUG: Type={type(b)}, Len={len(b(curr_x))}")
                     curr_x, attn = b(curr_x)
                     all_attns.append(attn)
             outs_b.append(curr_x)
