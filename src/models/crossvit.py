@@ -214,25 +214,10 @@ class MultiScaleBlock(nn.Module):
             else:
                 tmp = [norm_layer(dim[(d+1) % num_branches]), act_layer(), nn.Linear(dim[(d+1) % num_branches], dim[d])]
             self.revert_projs.append(nn.Sequential(*tmp))
-    '''
-    def forward(self, x):
-        outs_b = [block(x_) for x_, block in zip(x, self.blocks)]
-        # only take the cls token out
-        proj_cls_token = [proj(x[:, 0:1]) for x, proj in zip(outs_b, self.projs)]
-        # cross attention
-        outs = []
-        for i in range(self.num_branches):
-            tmp = torch.cat((proj_cls_token[i], outs_b[(i + 1) % self.num_branches][:, 1:, ...]), dim=1)
-            tmp = self.fusion[i](tmp)
-            reverted_proj_cls_token = self.revert_projs[i](tmp[:, 0:1, ...])
-            tmp = torch.cat((reverted_proj_cls_token, outs_b[i][:, 1:, ...]), dim=1)
-            outs.append(tmp)
-        return outs
-    '''
+
 
     def forward(self, x):
         all_attns = []
-
 
         outs_b = []
         for x_, block in zip(x, self.blocks):
@@ -255,6 +240,7 @@ class MultiScaleBlock(nn.Module):
 
             if isinstance(self.fusion[i], nn.Sequential):
                 for f_block in self.fusion[i]:
+                    print(f"DEBUG: Type={type(f_block)}, Len={len(f_block(tmp))}")
                     tmp, c_attn = f_block(tmp)
                     all_attns.append(c_attn)  # 收集 Cross-Attention 的权重
             else:
