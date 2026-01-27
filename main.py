@@ -21,7 +21,7 @@ def main():
     # Configuration
     CSV_FILE = './data/raw/prepared_dataset.csv'
     BATCH_SIZE = 32
-    NUM_EPOCHS = 2
+    NUM_EPOCHS = 50
     LEARNING_RATE = 1e-4
     WEIGHT_DECAY = 1e-5
     SEED = 42
@@ -55,10 +55,10 @@ def main():
     all_preds = {}
     
     # Boucle sur les 4 configurations
-    configs = ['A', 'B', 'C1', 'C2'] # Configurations partie 1
+    # configs = ['A', 'B', 'C1', 'C2'] # Configurations partie 1
     # configs = ['A', 'B', 'C1', 'C2'] # Configurations partie 2 asymetrique
     # configs = ['A', 'B', 'C1'] # Configurations partie 2 symetrique
-    #configs = ['Partie3_C'] # Configurations parte 3
+    configs = ['Partie3_C'] # Configurations parte 3
 
     for config in configs:
         print(f"\n{'='*70}")
